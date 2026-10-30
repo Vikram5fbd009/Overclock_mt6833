@@ -115,7 +115,7 @@ page_owner=on loop.max_part=7";
 			compatible = "arm,cortex-a76";
 			reg = <0x0600>;
 			enable-method = "psci";
-			clock-frequency = <2100000000>;
+			clock-frequency = <2303000000>;
 			cpu-idle-states = <&cpuoff_b &clusteroff_b
 						&mcusysoff  &s2idle>;
 		};
@@ -125,7 +125,7 @@ page_owner=on loop.max_part=7";
 			compatible = "arm,cortex-a76";
 			reg = <0x0700>;
 			enable-method = "psci";
-			clock-frequency = <2100000000>;
+			clock-frequency = <2303000000>;
 			cpu-idle-states = <&cpuoff_b &clusteroff_b
 						&mcusysoff &s2idle>;
 		};
@@ -1774,7 +1774,7 @@ page_owner=on loop.max_part=7";
 		little-down-time = <750>;
 		big-rise-time = <1000>;
 		big-down-time = <750>;
-		L-table = <2000 96 1 1
+		L-table = <2100 100 1 1
 			   1916 92 1 1
 			   1812 87 1 1
 			   1750 84 1 1
@@ -1791,7 +1791,7 @@ page_owner=on loop.max_part=7";
 			   620 40 4 1
 			   500 40 4 1 >;
 
-		B-table = <2210 104 1 1
+		B-table = <2303 108 1 1
 			   2093 99 1 1
 			   2000 95 1 1
 			   1906 91 1 1
