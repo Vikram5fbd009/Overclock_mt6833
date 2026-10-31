@@ -32,19 +32,16 @@ jobs:
 
       - name: ☁️ Download Toolchain (Clang r383902 & GCC)
         run: |
-          # ─── Clang r383902 (यही dabao1955/kernel_build_action भी use करता है) ───
           mkdir -p $GITHUB_WORKSPACE/toolchain/clang
           wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" -O clang.tar.gz
           tar -C $GITHUB_WORKSPACE/toolchain/clang -zxf clang.tar.gz
           rm clang.tar.gz
 
-          # GCC 64-bit
           mkdir -p $GITHUB_WORKSPACE/toolchain/gcc-64
           wget -q "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" -O gcc64.tar.gz
           tar -C $GITHUB_WORKSPACE/toolchain/gcc-64 -zxf gcc64.tar.gz
           rm gcc64.tar.gz
 
-          # GCC 32-bit
           mkdir -p $GITHUB_WORKSPACE/toolchain/gcc-32
           wget -q "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" -O gcc32.tar.gz
           tar -C $GITHUB_WORKSPACE/toolchain/gcc-32 -zxf gcc32.tar.gz
@@ -82,15 +79,202 @@ jobs:
           sed -i 's/ifdef stackp-check/ifdef DISABLED_STACKP_CHECK/' Makefile
           echo "✅ Stack Protector Error fixed!"
 
+      # ═══════════════════════════════════════════════════════════════════
+      # NEW STEP — Manual Hook patches (Non-GKI 4.14)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🩹 Apply Manual Hooks (Non-GKI 4.14)
+        run: |
+          echo "=== 1. Updating defconfig with Manual Hook configs ==="
+          DEFCONFIG="arch/arm64/configs/camellia_defconfig"
+
+          # Purge any pre-existing KSU-related lines for a clean slate
+          sed -i '/CONFIG_KSU/d' "$DEFCONFIG"
+
+          # Append manual-hook configs
+          {
+            echo ""
+            echo "# --- BakaSU Manual Hook (Non-GKI 4.14) ---"
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_MANUAL_HOOK=y"
+            echo "# CONFIG_KSU_TRACEPOINT_HOOK is not set"
+            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
+            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
+          } >> "$DEFCONFIG"
+
+          echo "✅ Defconfig updated:"
+          grep -E "^#? ?CONFIG_KSU" "$DEFCONFIG" || true
+          echo
+
+          echo "=== 2. Patching kernel source with manual hooks ==="
+          python3 - <<'PYEOF'
+import sys
+
+def patch(content, old, new, name, required=True):
+    if new.strip() in content:
+        print(f"✅ {name}: already patched")
+        return content
+    if old not in content:
+        if required:
+            print(f"❌ {name}: PATTERN NOT FOUND - cannot continue")
+            sys.exit(1)
+        print(f"⚠️  {name}: pattern not found (skipping - optional)")
+        return content
+    print(f"✅ {name}: patched")
+    return content.replace(old, new, 1)
+
+# ───────────── fs/exec.c ─────────────
+print("--- fs/exec.c ---")
+p = 'fs/exec.c'
+c = open(p).read()
+
+old = """static int do_execveat_common(int fd, struct filename *filename,
+			      struct user_arg_ptr argv,
+			      struct user_arg_ptr envp,
+			      int flags)
+{
+	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+}"""
+new = """#ifdef CONFIG_KSU_MANUAL_HOOK
+__attribute__((hot))
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                               void *argv, void *envp, int *flags);
+__attribute__((hot))
+extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
+                                    void *argv, void *envp, int *flags,
+                                    int *retval);
+#endif
+
+static int do_execveat_common(int fd, struct filename *filename,
+			      struct user_arg_ptr argv,
+			      struct user_arg_ptr envp,
+			      int flags)
+{
+#ifdef CONFIG_KSU_MANUAL_HOOK
+	int retval;
+	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+	retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
+	ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
+	return retval;
+#else
+	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+#endif
+}"""
+c = patch(c, old, new, 'do_execveat_common', required=True)
+open(p, 'w').write(c)
+
+# ───────────── fs/open.c ─────────────
+print("--- fs/open.c ---")
+p = 'fs/open.c'
+c = open(p).read()
+
+old = """SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+{
+	return do_faccessat(dfd, filename, mode);
+}"""
+new = """#ifdef CONFIG_KSU_MANUAL_HOOK
+__attribute__((hot))
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
+                                int *mode, int *flags);
+#endif
+
+SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+{
+#ifdef CONFIG_KSU_MANUAL_HOOK
+	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+#endif
+	return do_faccessat(dfd, filename, mode);
+}"""
+c = patch(c, old, new, 'faccessat', required=True)
+open(p, 'w').write(c)
+
+# ───────────── fs/stat.c ─────────────
+print("--- fs/stat.c ---")
+p = 'fs/stat.c'
+c = open(p).read()
+
+# 1. Declarations
+if 'extern int ksu_handle_stat' not in c:
+    decls = """#ifdef CONFIG_KSU_MANUAL_HOOK
+__attribute__((hot))
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
+                           int *flags);
+extern void ksu_handle_newfstat_ret(unsigned int *fd,
+                                    struct stat __user **statbuf_ptr);
+#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+extern void ksu_handle_fstat64_ret(unsigned long *fd,
+                                   struct stat64 __user **statbuf_ptr);
+#endif
+#endif
+
+"""
+    if 'SYSCALL_DEFINE4(newfstatat,' in c:
+        c = c.replace('SYSCALL_DEFINE4(newfstatat,', decls + 'SYSCALL_DEFINE4(newfstatat,', 1)
+        print("✅ stat.c: declarations inserted")
+    else:
+        print("❌ stat.c: newfstatat syscall not found")
+        sys.exit(1)
+else:
+    print("✅ stat.c: declarations already present")
+
+# 2. Hook vfs_fstatat (covers newfstatat + fstatat64)
+old = "error = vfs_fstatat(dfd, filename, &stat, flag);"
+new = """#ifdef CONFIG_KSU_MANUAL_HOOK
+	ksu_handle_stat(&dfd, &filename, &flag);
+#endif
+	error = vfs_fstatat(dfd, filename, &stat, flag);"""
+if old in c:
+    n = c.count(old)
+    c = c.replace(old, new)
+    print(f"✅ stat.c: vfs_fstatat hook inserted ({n} place(s))")
+else:
+    print("❌ stat.c: vfs_fstatat call not found")
+    sys.exit(1)
+
+# 3. Hook newfstat ret
+old = """	if (!error)
+		error = cp_new_stat(&stat, statbuf);
+
+	return error;"""
+new = """	if (!error)
+		error = cp_new_stat(&stat, statbuf);
+
+#ifdef CONFIG_KSU_MANUAL_HOOK
+	ksu_handle_newfstat_ret(&fd, &statbuf);
+#endif
+	return error;"""
+c = patch(c, old, new, 'newfstat_ret', required=True)
+
+# 4. Hook fstat64 ret (optional - only if 32-bit compat is present)
+old = """	if (!error)
+		error = cp_new_stat64(&stat, statbuf);
+
+	return error;"""
+new = """	if (!error)
+		error = cp_new_stat64(&stat, statbuf);
+
+#ifdef CONFIG_KSU_MANUAL_HOOK
+	ksu_handle_fstat64_ret(&fd, &statbuf);
+#endif
+	return error;"""
+c = patch(c, old, new, 'fstat64_ret', required=False)
+
+open(p, 'w').write(c)
+
+print()
+print("🎉 All manual hooks applied successfully!")
+PYEOF
+
+          echo
+          echo "=== 3. Verifying hooks are present ==="
+          grep -c "ksu_handle_execveat" fs/exec.c || true
+          grep -c "ksu_handle_faccessat" fs/open.c || true
+          grep -c "ksu_handle_stat" fs/stat.c || true
+          echo "✅ Manual hooks step completed!"
+
       - name: 🚀 Compile Kernel
         run: |
           export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc-64/bin:$GITHUB_WORKSPACE/toolchain/gcc-32/bin:$PATH"
 
-          # ⚠️ KEY FIX:
-          # 1. -Wno-error=unused-but-set-variable हटाया गया
-          #    → यह flag Clang r383902 में मौजूद ही नहीं → पहले यही build तोड़ रहा था
-          # 2. -Wno-unknown-warning-option जोड़ा गया
-          #    → भविष्य में कोई और unknown -Wno-... आ जाए तो भी error नहीं होगा
           KCFLAGS_FIX="-Wno-error=incompatible-pointer-types \
             -Wno-error=implicit-function-declaration \
             -Wno-error=int-conversion \
