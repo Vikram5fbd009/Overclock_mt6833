@@ -1,76 +1,36 @@
-name: Build Kernel (Fast Incremental Build)
+name: Build Kernel (Fast No-Cache)
 
 on:
   workflow_dispatch:
 
 jobs:
   build-kernel:
-    name: Build Kernel
+    name: Fast Build
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
         with:
-          repository: Vikram5fbd009/Overclock_mt6833
-          ref: backport-path_umount
-          path: kernel
+          fetch-depth: 1
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
             clang lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
-            cpio python3 zip kmod device-tree-compiler ccache
-
-      # 👇 YE CCACHE MAGIC HAI 👇
-      - name: Setup Ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ${{ runner.os }}-ccache-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-ccache-
+            cpio python3 zip kmod device-tree-compiler
 
       - name: Compile Kernel
-        working-directory: kernel
         run: |
-          export CCACHE_DIR=~/.ccache
-          export USE_CCACHE=1
-          export CC="ccache clang"
-          
-          set +e
-          
           # Config generate
-          make ARCH=arm64 CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- \
+          make ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
             CLANG_TRIPLE=aarch64-linux-gnu- O=out camellia_defconfig
           
-          # -k ka matlab: Error aane par ruko mat, saari files check karo
-          make ARCH=arm64 CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- \
-            CLANG_TRIPLE=aarch64-linux-gnu- O=out -k -j$(nproc) 2>&1 | tee ../build.log
-          
-          BUILD_EXIT=${PIPESTATUS[0]}
-          
-          echo "==========================================="
-          echo " ALL UNIQUE ERRORS:"
-          echo "==========================================="
-          grep -E "error:" ../build.log | sed -E 's/.*error: //' | sort -u | head -30
-          echo "========================================="
-          
-          if [ "$BUILD_EXIT" -ne 0 ]; then
-            echo "::error::Build failed. Next build will be 10x faster."
-            exit 1
-          fi
-
-      - name: Upload Full Log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-full
-          path: build.log
+          # Fast Build (No -k, No ccache. Error aate hi ruk jayega)
+          make ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
+            CLANG_TRIPLE=aarch64-linux-gnu- O=out -j$(nproc)
 
       - name: Build AnyKernel3
-        if: success()
-        working-directory: kernel
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git -b master AnyKernel3
           cd AnyKernel3
@@ -78,9 +38,8 @@ jobs:
           cp ../out/arch/arm64/boot/Image.gz-dtb .
           zip -r9 "../BakaSU-SUSFS-Kernel.zip" * -x .git/*
 
-      - name: Upload AnyKernel3 Zip
-        if: success()
+      - name: Upload Zip
         uses: actions/upload-artifact@v4
         with:
           name: kernel-flashable-zip
-          path: kernel/BakaSU-SUSFS-Kernel.zip
+          path: BakaSU-SUSFS-Kernel.zip
