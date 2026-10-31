@@ -1,32 +1,110 @@
-name: Build Kernel
+name: Build Kernel (Camellia)
 
 on:
-  workflow_dispatch:   # यह "Run workflow" बटन को सक्षम करता है
+  workflow_dispatch:
 
 jobs:
   build-kernel:
-    name: Build Kernel
+    name: Build Camellia (MT6833)
     runs-on: ubuntu-22.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
     steps:
-      - name: Build
-        uses: dabao1955/kernel_build_action@main
+      - name: ⏰ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ⌛️ Set Swap Space (16GB)
+        uses: pierotofy/set-swap-space@master
         with:
-          # --- आपकी कर्नेल रिपॉज़िटरी की जानकारी ---
-          # यहाँ अपनी रिपॉजिटरी और ब्रांच का नाम डालें जहाँ पैच किया हुआ कोड है
-          kernel-url: https://github.com/Vikram5fbd009/Overclock_mt6833
-          kernel-branch: backport-path_umount   # <-- आपकी ब्रांच जहाँ SUSFS, KSU आदि है
-          config: camellia_defconfig            # <-- आपके डिवाइस का defconfig
+          swap-size-gb: 16
+
+      - name: ⚙️ Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git ccache automake flex lzop bison gperf \
+          build-essential zip curl zlib1g-dev libxml2-utils bzip2 libbz2-dev \
+          squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng \
+          maven libssl-dev pwgen minicom bc libx11-dev libgl1-mesa-dev xsltproc \
+          unzip device-tree-compiler python3 binutils-aarch64-linux-gnu
+
+      - name: ☁️ Download Toolchain (Clang r383902 & GCC)
+        run: |
+          # Clang r383902 (4.14 के लिए सबसे स्टेबल)
+          mkdir -p $GITHUB_WORKSPACE/toolchain/clang
+          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" -O clang.tar.gz
+          tar -C $GITHUB_WORKSPACE/toolchain/clang -zxf clang.tar.gz
+          rm clang.tar.gz
+
+          # GCC 64-bit
+          mkdir -p $GITHUB_WORKSPACE/toolchain/gcc-64
+          wget -q "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" -O gcc64.tar.gz
+          tar -C $GITHUB_WORKSPACE/toolchain/gcc-64 -zxf gcc64.tar.gz
+          rm gcc64.tar.gz
+
+          # GCC 32-bit
+          mkdir -p $GITHUB_WORKSPACE/toolchain/gcc-32
+          wget -q "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" -O gcc32.tar.gz
+          tar -C $GITHUB_WORKSPACE/toolchain/gcc-32 -zxf gcc32.tar.gz
+          rm gcc32.tar.gz
           
-          # --- आर्किटेक्चर और टूलचेन ---
-          arch: arm64
-          android-version: 12                   # <-- आपके डिवाइस का Android वर्ज़न
-          aosp-clang-version: r383902           # 4.14 कर्नेल के लिए उपयुक्त Clang वर्ज़न
+          echo "✅ Toolchain Downloaded!"
+
+      - name: 🔗 Setup KernelSU & Symlink (Fix for CI)
+        run: |
+          echo "Downloading ReSukiSU..."
+          # KernelSU को CI के अंदर ही सेटअप करें
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
           
-          # --- AnyKernel3 पैकेजिंग (यही आपकी समस्या का हल है) ---
-          # इसे true करने से AnyKernel3 ज़िप बनेगी और bootimg-url की जरूरत नहीं पड़ेगी
-          anykernel3: true
+          echo "Creating correct symlink..."
+          # सही रिलेटिव पाथ के साथ सिमलिंक बनाएं
+          ln -sfn ../KernelSU/kernel drivers/kernelsu
           
-          # --- KernelSU ---
-          # चूंकि आपके सोर्स में KSU पहले से है, इसे false रखें
-          # ताकि एक्शन खुद से KSU को डाउनलोड न करे
-          ksu: false
+          # सेफ्टी चेक: अगर Kconfig और Makefile में एंट्री नहीं है तो जोड़ दें
+          if ! grep -q "drivers/kernelsu" drivers/Makefile; then
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          fi
+          
+          if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          fi
+          echo "✅ KernelSU Symlink fixed!"
+
+      - name: 🚀 Compile Kernel
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc-64/bin:$GITHUB_WORKSPACE/toolchain/gcc-32/bin:$PATH"
+          
+          KCFLAGS_FIX="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=return-type -Wno-error=macro-redefined -Wno-error=array-bounds -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=address-of-packed-member"
+
+          # 1. Defconfig बनाएं
+          make O=out ARCH=arm64 camellia_defconfig
+          
+          # 2. मुख्य बिल्ड
+          make -j$(nproc --all) O=out ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            KCFLAGS="$KCFLAGS_FIX"
+
+      - name: 📦 Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git -b master anykernel
+          cp out/arch/arm64/boot/Image.gz-dtb anykernel/
+          cd anykernel
+          zip -r ../AnyKernel3-camellia.zip . -x "*.git*"
+
+      - name: ✏️ Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Camellia-Kernel-AnyKernel3
+          path: AnyKernel3-camellia.zip
+          retention-days: 7
