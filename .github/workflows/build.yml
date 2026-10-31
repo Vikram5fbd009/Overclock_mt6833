@@ -14,7 +14,7 @@ jobs:
           repository: Vikram5fbd009/Overclock_mt6833
           ref: backport-path_umount
           path: kernel
-          submodules: recursive
+          # 👇 submodules: recursive hata diya hai
 
       - name: Install Dependencies
         run: |
@@ -26,19 +26,16 @@ jobs:
       - name: Compile with -k (collect ALL errors)
         working-directory: kernel
         run: |
-          set +e  # errors aane par bhi continue
+          set +e
           
-          # Config generate
           make ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
             CLANG_TRIPLE=aarch64-linux-gnu- O=out camellia_defconfig
           
-          # Full compile with -k (keep-going)
           make ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
             CLANG_TRIPLE=aarch64-linux-gnu- O=out -k -j$(nproc) 2>&1 | tee ../build.log
           
           BUILD_EXIT=${PIPESTATUS[0]}
           
-          # Unique errors extract karo
           echo ""
           echo "==========================================="
           echo " ALL UNIQUE ERRORS (duplicates hata ke)"
