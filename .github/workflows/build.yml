@@ -79,18 +79,13 @@ jobs:
           sed -i 's/ifdef stackp-check/ifdef DISABLED_STACKP_CHECK/' Makefile
           echo "✅ Stack Protector Error fixed!"
 
-      # ═══════════════════════════════════════════════════════════════════
-      # NEW STEP — Manual Hook patches (Non-GKI 4.14)
-      # ═══════════════════════════════════════════════════════════════════
       - name: 🩹 Apply Manual Hooks (Non-GKI 4.14)
         run: |
-          echo "=== 1. Updating defconfig with Manual Hook configs ==="
+          set -e
+
+          echo "=== 1. Updating defconfig ==="
           DEFCONFIG="arch/arm64/configs/camellia_defconfig"
-
-          # Purge any pre-existing KSU-related lines for a clean slate
           sed -i '/CONFIG_KSU/d' "$DEFCONFIG"
-
-          # Append manual-hook configs
           {
             echo ""
             echo "# --- BakaSU Manual Hook (Non-GKI 4.14) ---"
@@ -100,176 +95,117 @@ jobs:
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
           } >> "$DEFCONFIG"
+          echo "✅ Defconfig updated"
 
-          echo "✅ Defconfig updated:"
-          grep -E "^#? ?CONFIG_KSU" "$DEFCONFIG" || true
-          echo
-
-          echo "=== 2. Patching kernel source with manual hooks ==="
+          echo "=== 2. Patching kernel source ==="
           python3 - <<'PYEOF'
-import sys
+          import sys
 
-def patch(content, old, new, name, required=True):
-    if new.strip() in content:
-        print(f"✅ {name}: already patched")
-        return content
-    if old not in content:
-        if required:
-            print(f"❌ {name}: PATTERN NOT FOUND - cannot continue")
-            sys.exit(1)
-        print(f"⚠️  {name}: pattern not found (skipping - optional)")
-        return content
-    print(f"✅ {name}: patched")
-    return content.replace(old, new, 1)
+          def do_patch(path, old, new, label, required=True):
+              c = open(path).read()
+              if new in c:
+                  print("  OK %s: already patched" % label)
+                  return
+              if old not in c:
+                  if required:
+                      print("  FAIL %s: PATTERN NOT FOUND" % label)
+                      sys.exit(1)
+                  print("  SKIP %s: pattern not found" % label)
+                  return
+              c = c.replace(old, new, 1)
+              open(path, "w").write(c)
+              print("  OK %s: patched" % label)
 
-# ───────────── fs/exec.c ─────────────
-print("--- fs/exec.c ---")
-p = 'fs/exec.c'
-c = open(p).read()
+          def add_externs(path, anchor, lines, label):
+              c = open(path).read()
+              if lines[0] in c:
+                  print("  OK %s: externs already present" % label)
+                  return
+              if anchor not in c:
+                  print("  FAIL %s: anchor not found" % label)
+                  sys.exit(1)
+              c = c.replace(anchor, "\n".join(lines) + "\n\n" + anchor, 1)
+              open(path, "w").write(c)
+              print("  OK %s: externs inserted" % label)
 
-old = """static int do_execveat_common(int fd, struct filename *filename,
-			      struct user_arg_ptr argv,
-			      struct user_arg_ptr envp,
-			      int flags)
-{
-	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
-}"""
-new = """#ifdef CONFIG_KSU_MANUAL_HOOK
-__attribute__((hot))
-extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
-                               void *argv, void *envp, int *flags);
-__attribute__((hot))
-extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
-                                    void *argv, void *envp, int *flags,
-                                    int *retval);
-#endif
+          # ---------- fs/exec.c ----------
+          print("[fs/exec.c]")
+          add_externs("fs/exec.c", "static int do_execveat_common(int fd,",
+              ["#ifdef CONFIG_KSU_MANUAL_HOOK",
+               "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);",
+               "extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);",
+               "#endif"],
+              "exec.c externs")
 
-static int do_execveat_common(int fd, struct filename *filename,
-			      struct user_arg_ptr argv,
-			      struct user_arg_ptr envp,
-			      int flags)
-{
-#ifdef CONFIG_KSU_MANUAL_HOOK
-	int retval;
-	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-	retval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
-	ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
-	return retval;
-#else
-	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
-#endif
-}"""
-c = patch(c, old, new, 'do_execveat_common', required=True)
-open(p, 'w').write(c)
+          old = "return __do_execve_file(fd, filename, argv, envp, flags, NULL);"
+          new = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                 "\tint retval;\n"
+                 "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
+                 "\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n"
+                 "\tksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);\n"
+                 "\treturn retval;\n"
+                 "#else\n"
+                 "\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n"
+                 "#endif")
+          do_patch("fs/exec.c", old, new, "exec.c body")
 
-# ───────────── fs/open.c ─────────────
-print("--- fs/open.c ---")
-p = 'fs/open.c'
-c = open(p).read()
+          # ---------- fs/open.c ----------
+          print("[fs/open.c]")
+          add_externs("fs/open.c", "SYSCALL_DEFINE3(faccessat,",
+              ["#ifdef CONFIG_KSU_MANUAL_HOOK",
+               "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);",
+               "#endif"],
+              "open.c externs")
 
-old = """SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
-{
-	return do_faccessat(dfd, filename, mode);
-}"""
-new = """#ifdef CONFIG_KSU_MANUAL_HOOK
-__attribute__((hot))
-extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
-                                int *mode, int *flags);
-#endif
+          old = "return do_faccessat(dfd, filename, mode);"
+          new = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                 "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+                 "#endif\n"
+                 "\treturn do_faccessat(dfd, filename, mode);")
+          do_patch("fs/open.c", old, new, "open.c body")
 
-SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
-{
-#ifdef CONFIG_KSU_MANUAL_HOOK
-	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
-#endif
-	return do_faccessat(dfd, filename, mode);
-}"""
-c = patch(c, old, new, 'faccessat', required=True)
-open(p, 'w').write(c)
+          # ---------- fs/stat.c ----------
+          print("[fs/stat.c]")
+          add_externs("fs/stat.c", "SYSCALL_DEFINE4(newfstatat,",
+              ["#ifdef CONFIG_KSU_MANUAL_HOOK",
+               "extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);",
+               "extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);",
+               "#endif"],
+              "stat.c externs")
 
-# ───────────── fs/stat.c ─────────────
-print("--- fs/stat.c ---")
-p = 'fs/stat.c'
-c = open(p).read()
+          old = "error = vfs_fstatat(dfd, filename, &stat, flag);"
+          new = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                 "\tksu_handle_stat(&dfd, &filename, &flag);\n"
+                 "#endif\n"
+                 "\terror = vfs_fstatat(dfd, filename, &stat, flag);")
+          c = open("fs/stat.c").read()
+          if new in c:
+              print("  OK stat.c vfs_fstatat: already patched")
+          elif old in c:
+              c = c.replace(old, new)
+              open("fs/stat.c", "w").write(c)
+              print("  OK stat.c vfs_fstatat: patched")
+          else:
+              print("  FAIL stat.c vfs_fstatat: pattern not found")
+              sys.exit(1)
 
-# 1. Declarations
-if 'extern int ksu_handle_stat' not in c:
-    decls = """#ifdef CONFIG_KSU_MANUAL_HOOK
-__attribute__((hot))
-extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
-                           int *flags);
-extern void ksu_handle_newfstat_ret(unsigned int *fd,
-                                    struct stat __user **statbuf_ptr);
-#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
-extern void ksu_handle_fstat64_ret(unsigned long *fd,
-                                   struct stat64 __user **statbuf_ptr);
-#endif
-#endif
+          old = "error = cp_new_stat(&stat, statbuf);"
+          new = ("error = cp_new_stat(&stat, statbuf);\n"
+                 "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                 "\tksu_handle_newfstat_ret(&fd, &statbuf);\n"
+                 "#endif")
+          do_patch("fs/stat.c", old, new, "stat.c newfstat_ret")
 
-"""
-    if 'SYSCALL_DEFINE4(newfstatat,' in c:
-        c = c.replace('SYSCALL_DEFINE4(newfstatat,', decls + 'SYSCALL_DEFINE4(newfstatat,', 1)
-        print("✅ stat.c: declarations inserted")
-    else:
-        print("❌ stat.c: newfstatat syscall not found")
-        sys.exit(1)
-else:
-    print("✅ stat.c: declarations already present")
-
-# 2. Hook vfs_fstatat (covers newfstatat + fstatat64)
-old = "error = vfs_fstatat(dfd, filename, &stat, flag);"
-new = """#ifdef CONFIG_KSU_MANUAL_HOOK
-	ksu_handle_stat(&dfd, &filename, &flag);
-#endif
-	error = vfs_fstatat(dfd, filename, &stat, flag);"""
-if old in c:
-    n = c.count(old)
-    c = c.replace(old, new)
-    print(f"✅ stat.c: vfs_fstatat hook inserted ({n} place(s))")
-else:
-    print("❌ stat.c: vfs_fstatat call not found")
-    sys.exit(1)
-
-# 3. Hook newfstat ret
-old = """	if (!error)
-		error = cp_new_stat(&stat, statbuf);
-
-	return error;"""
-new = """	if (!error)
-		error = cp_new_stat(&stat, statbuf);
-
-#ifdef CONFIG_KSU_MANUAL_HOOK
-	ksu_handle_newfstat_ret(&fd, &statbuf);
-#endif
-	return error;"""
-c = patch(c, old, new, 'newfstat_ret', required=True)
-
-# 4. Hook fstat64 ret (optional - only if 32-bit compat is present)
-old = """	if (!error)
-		error = cp_new_stat64(&stat, statbuf);
-
-	return error;"""
-new = """	if (!error)
-		error = cp_new_stat64(&stat, statbuf);
-
-#ifdef CONFIG_KSU_MANUAL_HOOK
-	ksu_handle_fstat64_ret(&fd, &statbuf);
-#endif
-	return error;"""
-c = patch(c, old, new, 'fstat64_ret', required=False)
-
-open(p, 'w').write(c)
-
-print()
-print("🎉 All manual hooks applied successfully!")
-PYEOF
+          print()
+          print("ALL PATCHES APPLIED")
+          PYEOF
 
           echo
-          echo "=== 3. Verifying hooks are present ==="
-          grep -c "ksu_handle_execveat" fs/exec.c || true
-          grep -c "ksu_handle_faccessat" fs/open.c || true
-          grep -c "ksu_handle_stat" fs/stat.c || true
-          echo "✅ Manual hooks step completed!"
+          echo "=== 3. Verify ==="
+          echo "exec.c: $(grep -c 'ksu_handle_execveat' fs/exec.c) hook(s)"
+          echo "open.c: $(grep -c 'ksu_handle_faccessat' fs/open.c) hook(s)"
+          echo "stat.c: $(grep -c 'ksu_handle_stat' fs/stat.c) hook(s)"
+          echo "✅ DONE"
 
       - name: 🚀 Compile Kernel
         run: |
