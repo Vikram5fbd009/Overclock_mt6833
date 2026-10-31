@@ -210,12 +210,21 @@ jobs:
               insert_hook_at_start("fs/stat.c", "SYSCALL_DEFINE2(newfstat,",
                   "ksu_handle_newfstat_ret(&fd, &statbuf);",
                   "stat.c newfstat_ret_fallback")
-
-          # ✅ ADD MISSING fstat64 HOOK
           insert_after_pattern("fs/stat.c",
               "error = cp_new_stat64(&stat, statbuf);",
               "ksu_handle_fstat64_ret(&fd, &statbuf);",
               "stat.c fstat64_ret")
+
+          # ✅ ADD MISSING sys_reboot HOOK
+          print("[kernel/reboot.c]")
+          add_externs("kernel/reboot.c", "SYSCALL_DEFINE4(reboot,",
+              ["#ifdef CONFIG_KSU_MANUAL_HOOK",
+               "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);",
+               "#endif"],
+              "reboot.c externs")
+          insert_hook_at_start("kernel/reboot.c", "SYSCALL_DEFINE4(reboot,",
+              "ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);",
+              "reboot.c body")
 
           print("PATCHES COMPLETE")
           PYEOF
@@ -225,6 +234,7 @@ jobs:
           echo "open.c hooks: $(grep -c ksu_handle_faccessat fs/open.c || echo 0)"
           echo "stat.c hooks: $(grep -c ksu_handle_stat fs/stat.c || echo 0)"
           echo "stat.c fstat64 hooks: $(grep -c ksu_handle_fstat64_ret fs/stat.c || echo 0)"
+          echo "reboot.c hooks: $(grep -c ksu_handle_sys_reboot kernel/reboot.c || echo 0)"
           echo "Manual Hook step done"
 
       - name: 🚀 Compile Kernel
