@@ -1,4 +1,4 @@
-name: Build Kernel (Boot.img)
+name: Build Kernel (AnyKernel3)
 
 on:
   workflow_dispatch:
@@ -18,9 +18,11 @@ jobs:
           android-version: 12
           aosp-clang-version: r383902
           
-          anykernel3: false 
+          # 👇 AnyKernel3 ko Enable kiya (Zip banega)
+          anykernel3: true
           
-          # 👇 यहाँ अपना कॉपी किया हुआ डायरेक्ट लिंक पेस्ट करें
-          bootimg-url: "https://github.com/cristidclxvi/android_device_xiaomi_camellia/releases/download/23.2-20260901/boot.img"
+          # MTK 4.14 ke liye zaroori image naam
+          anykernel3-args: "-k Image.gz-dtb"
           
+          # 👇 KSU false hi rahega kyunki humara BakaSU source me pehle se hai
           ksu: false
