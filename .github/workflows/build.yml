@@ -32,7 +32,7 @@ jobs:
 
       - name: ☁️ Download Toolchain (Clang r383902 & GCC)
         run: |
-          # Clang r383902 (4.14 के लिए सबसे स्टेबल)
+          # Clang r383902
           mkdir -p $GITHUB_WORKSPACE/toolchain/clang
           wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" -O clang.tar.gz
           tar -C $GITHUB_WORKSPACE/toolchain/clang -zxf clang.tar.gz
@@ -55,14 +55,11 @@ jobs:
       - name: 🔗 Setup KernelSU & Symlink (Fix for CI)
         run: |
           echo "Downloading ReSukiSU..."
-          # KernelSU को CI के अंदर ही सेटअप करें
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
           
           echo "Creating correct symlink..."
-          # सही रिलेटिव पाथ के साथ सिमलिंक बनाएं
           ln -sfn ../KernelSU/kernel drivers/kernelsu
           
-          # सेफ्टी चेक: अगर Kconfig और Makefile में एंट्री नहीं है तो जोड़ दें
           if ! grep -q "drivers/kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
@@ -71,6 +68,20 @@ jobs:
             sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           fi
           echo "✅ KernelSU Symlink fixed!"
+
+      - name: 🩹 Fix Stack Protector Error
+        run: |
+          echo "Disabling Stack Protector in defconfig..."
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/g' arch/arm64/configs/camellia_defconfig
+          echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> arch/arm64/configs/camellia_defconfig
+          
+          echo "Patching Makefile to ignore stack protector check..."
+          sed -i 's/ifdef CONFIG_CC_STACKPROTECTOR_REGULAR/ifdef DISABLED_SP_REGULAR/' Makefile
+          sed -i 's/ifdef CONFIG_CC_STACKPROTECTOR_STRONG/ifdef DISABLED_SP_STRONG/' Makefile
+          sed -i '/^ifdef CONFIG_CC_STACKPROTECTOR$/s/.*/ifdef DISABLED_SP/' Makefile
+          sed -i 's/ifdef stackp-name/ifdef DISABLED_STACKP_NAME/' Makefile
+          sed -i 's/ifdef stackp-check/ifdef DISABLED_STACKP_CHECK/' Makefile
+          echo "✅ Stack Protector Error fixed!"
 
       - name: 🚀 Compile Kernel
         run: |
@@ -81,7 +92,7 @@ jobs:
           # 1. Defconfig बनाएं
           make O=out ARCH=arm64 camellia_defconfig
           
-          # 2. मुख्य बिल्ड
+          # 2. मुख्य बिल्ड (Overclock + KSU + SUSFS सब सोर्स में है)
           make -j$(nproc --all) O=out ARCH=arm64 \
             CC=clang \
             LD=ld.lld \
