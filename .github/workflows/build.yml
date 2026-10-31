@@ -32,7 +32,7 @@ jobs:
 
       - name: ☁️ Download Toolchain (Clang r383902 & GCC)
         run: |
-          # Clang r383902
+          # ─── Clang r383902 (यही dabao1955/kernel_build_action भी use करता है) ───
           mkdir -p $GITHUB_WORKSPACE/toolchain/clang
           wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" -O clang.tar.gz
           tar -C $GITHUB_WORKSPACE/toolchain/clang -zxf clang.tar.gz
@@ -49,21 +49,22 @@ jobs:
           wget -q "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" -O gcc32.tar.gz
           tar -C $GITHUB_WORKSPACE/toolchain/gcc-32 -zxf gcc32.tar.gz
           rm gcc32.tar.gz
-          
-          echo "✅ Toolchain Downloaded!"
 
-      - name: 🔗 Setup KernelSU & Symlink (Fix for CI)
+          echo "✅ Toolchain Downloaded!"
+          $GITHUB_WORKSPACE/toolchain/clang/bin/clang --version
+
+      - name: 🔗 Setup KernelSU & Symlink
         run: |
           echo "Downloading ReSukiSU..."
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-          
+
           echo "Creating correct symlink..."
           ln -sfn ../KernelSU/kernel drivers/kernelsu
-          
+
           if ! grep -q "drivers/kernelsu" drivers/Makefile; then
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           fi
-          
+
           if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
             sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           fi
@@ -71,11 +72,9 @@ jobs:
 
       - name: 🩹 Fix Stack Protector Error
         run: |
-          echo "Disabling Stack Protector in defconfig..."
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/g' arch/arm64/configs/camellia_defconfig
           echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> arch/arm64/configs/camellia_defconfig
-          
-          echo "Patching Makefile to ignore stack protector check..."
+
           sed -i 's/ifdef CONFIG_CC_STACKPROTECTOR_REGULAR/ifdef DISABLED_SP_REGULAR/' Makefile
           sed -i 's/ifdef CONFIG_CC_STACKPROTECTOR_STRONG/ifdef DISABLED_SP_STRONG/' Makefile
           sed -i '/^ifdef CONFIG_CC_STACKPROTECTOR$/s/.*/ifdef DISABLED_SP/' Makefile
@@ -86,13 +85,24 @@ jobs:
       - name: 🚀 Compile Kernel
         run: |
           export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$GITHUB_WORKSPACE/toolchain/gcc-64/bin:$GITHUB_WORKSPACE/toolchain/gcc-32/bin:$PATH"
-          
-          KCFLAGS_FIX="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=return-type -Wno-error=macro-redefined -Wno-error=array-bounds -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=address-of-packed-member"
 
-          # 1. Defconfig बनाएं
+          # ⚠️ KEY FIX:
+          # 1. -Wno-error=unused-but-set-variable हटाया गया
+          #    → यह flag Clang r383902 में मौजूद ही नहीं → पहले यही build तोड़ रहा था
+          # 2. -Wno-unknown-warning-option जोड़ा गया
+          #    → भविष्य में कोई और unknown -Wno-... आ जाए तो भी error नहीं होगा
+          KCFLAGS_FIX="-Wno-error=incompatible-pointer-types \
+            -Wno-error=implicit-function-declaration \
+            -Wno-error=int-conversion \
+            -Wno-error=return-type \
+            -Wno-error=macro-redefined \
+            -Wno-error=array-bounds \
+            -Wno-error=unused-variable \
+            -Wno-error=address-of-packed-member \
+            -Wno-unknown-warning-option"
+
           make O=out ARCH=arm64 camellia_defconfig
-          
-          # 2. मुख्य बिल्ड (Overclock + KSU + SUSFS सब सोर्स में है)
+
           make -j$(nproc --all) O=out ARCH=arm64 \
             CC=clang \
             LD=ld.lld \
