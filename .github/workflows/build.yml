@@ -1,4 +1,4 @@
-name: Build Kernel (Collect All Errors)
+name: Build Kernel (Fast Incremental Build)
 
 on:
   workflow_dispatch:
@@ -14,45 +14,50 @@ jobs:
           repository: Vikram5fbd009/Overclock_mt6833
           ref: backport-path_umount
           path: kernel
-          # 👇 submodules: recursive hata diya hai
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
             clang lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
-            cpio python3 zip kmod device-tree-compiler
+            cpio python3 zip kmod device-tree-compiler ccache
 
-      - name: Compile with -k (collect ALL errors)
+      # 👇 YE CCACHE MAGIC HAI 👇
+      - name: Setup Ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Compile Kernel
         working-directory: kernel
         run: |
+          export CCACHE_DIR=~/.ccache
+          export USE_CCACHE=1
+          export CC="ccache clang"
+          
           set +e
           
-          make ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
+          # Config generate
+          make ARCH=arm64 CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- \
             CLANG_TRIPLE=aarch64-linux-gnu- O=out camellia_defconfig
           
-          make ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
+          # -k ka matlab: Error aane par ruko mat, saari files check karo
+          make ARCH=arm64 CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- \
             CLANG_TRIPLE=aarch64-linux-gnu- O=out -k -j$(nproc) 2>&1 | tee ../build.log
           
           BUILD_EXIT=${PIPESTATUS[0]}
           
-          echo ""
           echo "==========================================="
-          echo " ALL UNIQUE ERRORS (duplicates hata ke)"
+          echo " ALL UNIQUE ERRORS:"
           echo "==========================================="
-          grep -E "error:" ../build.log | \
-            sed -E 's/.*error: //' | \
-            sort -u | \
-            head -50
-          echo "==========================================="
-          
-          ERROR_COUNT=$(grep -c "error:" ../build.log)
-          echo "Total error lines: $ERROR_COUNT"
-          echo "Unique error types: $(grep -E 'error:' ../build.log | sed -E 's/.*error: //' | sort -u | wc -l)"
+          grep -E "error:" ../build.log | sed -E 's/.*error: //' | sort -u | head -30
+          echo "========================================="
           
           if [ "$BUILD_EXIT" -ne 0 ]; then
-            echo ""
-            echo "::error::Build failed with $ERROR_COUNT errors. Check summary above."
+            echo "::error::Build failed. Next build will be 10x faster."
             exit 1
           fi
 
@@ -62,7 +67,6 @@ jobs:
         with:
           name: build-log-full
           path: build.log
-          retention-days: 7
 
       - name: Build AnyKernel3
         if: success()
@@ -72,11 +76,11 @@ jobs:
           cd AnyKernel3
           rm -rf .git .github README.md
           cp ../out/arch/arm64/boot/Image.gz-dtb .
-          zip -r9 "../BakaSU-SUSFS-AnyKernel3.zip" * -x .git/*
+          zip -r9 "../BakaSU-SUSFS-Kernel.zip" * -x .git/*
 
       - name: Upload AnyKernel3 Zip
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-zip
-          path: kernel/BakaSU-SUSFS-AnyKernel3.zip
+          name: kernel-flashable-zip
+          path: kernel/BakaSU-SUSFS-Kernel.zip
