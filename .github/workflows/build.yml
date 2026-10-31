@@ -192,6 +192,9 @@ jobs:
               ["#ifdef CONFIG_KSU_MANUAL_HOOK",
                "extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);",
                "extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);",
+               "#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)",
+               "extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);",
+               "#endif",
                "#endif"],
               "stat.c externs")
           insert_hook_at_start("fs/stat.c", "SYSCALL_DEFINE4(newfstatat,",
@@ -208,6 +211,12 @@ jobs:
                   "ksu_handle_newfstat_ret(&fd, &statbuf);",
                   "stat.c newfstat_ret_fallback")
 
+          # ✅ ADD MISSING fstat64 HOOK
+          insert_after_pattern("fs/stat.c",
+              "error = cp_new_stat64(&stat, statbuf);",
+              "ksu_handle_fstat64_ret(&fd, &statbuf);",
+              "stat.c fstat64_ret")
+
           print("PATCHES COMPLETE")
           PYEOF
 
@@ -215,6 +224,7 @@ jobs:
           echo "exec.c hooks: $(grep -c ksu_handle_execveat fs/exec.c || echo 0)"
           echo "open.c hooks: $(grep -c ksu_handle_faccessat fs/open.c || echo 0)"
           echo "stat.c hooks: $(grep -c ksu_handle_stat fs/stat.c || echo 0)"
+          echo "stat.c fstat64 hooks: $(grep -c ksu_handle_fstat64_ret fs/stat.c || echo 0)"
           echo "Manual Hook step done"
 
       - name: 🚀 Compile Kernel
